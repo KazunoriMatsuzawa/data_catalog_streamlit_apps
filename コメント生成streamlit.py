@@ -34,6 +34,10 @@ st.title("テーブル・カラムコメント生成")
 # セッションステートの初期化
 if 'refresh' not in st.session_state:
     st.session_state.refresh = 0
+if 'generated_col_comments' not in st.session_state:
+    st.session_state.generated_col_comments = None
+if 'generated_table_comment' not in st.session_state:
+    st.session_state.generated_table_comment = None
 
 # 左右2カラムレイアウト
 left_col, right_col = st.columns([1, 3])
@@ -50,14 +54,14 @@ with left_col:
     # スキーマ選択
     selected_schema = None
     if selected_db:
-        schemas = session.sql(f"SHOW SCHEMAS IN DATABASE {selected_db}").collect()
+        schemas = session.sql(f'SHOW SCHEMAS IN DATABASE "{selected_db}"').collect()
         schema_list = [row['name'] for row in schemas]
         selected_schema = st.selectbox("スキーマ", schema_list, key="schema_select")
     
     # テーブル選択
     selected_table = None
     if selected_db and selected_schema:
-        tables = session.sql(f"SHOW TABLES IN {selected_db}.{selected_schema}").collect()
+        tables = session.sql(f'SHOW TABLES IN "{selected_db}"."{selected_schema}"').collect()
         table_list = [row['name'] for row in tables]
         selected_table = st.selectbox("テーブル", table_list, key="table_select")
     
@@ -75,7 +79,7 @@ with left_col:
             # テーブルコメント取得
             table_info = session.sql(f"""
                 SELECT COMMENT
-                FROM {selected_db}.INFORMATION_SCHEMA.TABLES
+                FROM "{selected_db}".INFORMATION_SCHEMA.TABLES
                 WHERE TABLE_SCHEMA = '{selected_schema}'
                   AND TABLE_NAME = '{selected_table}'
             """).collect()
@@ -87,7 +91,7 @@ with left_col:
                 SELECT 
                     COUNT(*) as total_columns,
                     COUNT(COMMENT) as commented_columns
-                FROM {selected_db}.INFORMATION_SCHEMA.COLUMNS
+                FROM "{selected_db}".INFORMATION_SCHEMA.COLUMNS
                 WHERE TABLE_SCHEMA = '{selected_schema}'
                   AND TABLE_NAME = '{selected_table}'
             """).collect()
@@ -113,7 +117,7 @@ with left_col:
         
         st.markdown("---")
         #st.subheader("AI生成")
-        st.markdown("**AI生成（上書き保存のため注意）**")
+        st.markdown("**AI生成**")
         
         if st.button("テーブルコメント生成", use_container_width=True, type="primary"):
             with st.spinner("生成中..."):
@@ -127,7 +131,7 @@ with left_col:
                         $$
                             var get_columns_sql = `
                                 SELECT COLUMN_NAME
-                                FROM {selected_db}.INFORMATION_SCHEMA.COLUMNS
+                                FROM "{selected_db}".INFORMATION_SCHEMA.COLUMNS
                                 WHERE TABLE_SCHEMA = '{selected_schema}'
                                   AND TABLE_NAME = '{selected_table}'
                                 ORDER BY ORDINAL_POSITION
@@ -158,19 +162,16 @@ with left_col:
                             result.next();
                             var ai_comment = result.getColumnValue(1);
                             
-                            var escaped = ai_comment.replace(/'/g, "''");
-                            var alter_sql = `ALTER TABLE {selected_db}.{selected_schema}.{selected_table} SET COMMENT = '` + escaped + `'`;
-                            
-                            var alter_stmt = snowflake.createStatement({{sqlText: alter_sql}});
-                            alter_stmt.execute();
-                            
                             return ai_comment;
                         $$
                     """).collect()
                     
                     result = session.sql(f"CALL gen_tbl_cmt_{selected_table}()").collect()
+                    generated_comment = result[0][0] if result else ""
+                    
+                    # セッションステートに保存
+                    st.session_state.generated_table_comment = generated_comment
                     st.success("✅ 生成完了！")
-                    st.session_state.refresh += 1
                     st.rerun()
                 except Exception as e:
                     st.error(f"❌ エラー: {str(e)}")
@@ -187,7 +188,7 @@ with left_col:
                         $$
                             var get_table_comment_sql = `
                                 SELECT COMMENT
-                                FROM {selected_db}.INFORMATION_SCHEMA.TABLES
+                                FROM "{selected_db}".INFORMATION_SCHEMA.TABLES
                                 WHERE TABLE_SCHEMA = '{selected_schema}'
                                   AND TABLE_NAME = '{selected_table}'
                             `;
@@ -199,7 +200,7 @@ with left_col:
                             
                             var get_columns_sql = `
                                 SELECT COLUMN_NAME, DATA_TYPE
-                                FROM {selected_db}.INFORMATION_SCHEMA.COLUMNS
+                                FROM "{selected_db}".INFORMATION_SCHEMA.COLUMNS
                                 WHERE TABLE_SCHEMA = '{selected_schema}'
                                   AND TABLE_NAME = '{selected_table}'
                                 ORDER BY ORDINAL_POSITION
@@ -207,13 +208,26 @@ with left_col:
                             
                             var stmt = snowflake.createStatement({{sqlText: get_columns_sql}});
                             var columns = stmt.execute();
-                            var success = 0;
+                            var result_array = [];
                             
                             while (columns.next()) {{
                                 var col_name = columns.getColumnValue(1);
                                 var data_type = columns.getColumnValue(2);
                                 
                                 try {{
+                                    // サンプルデータを取得
+                                    var sample_sql = `SELECT TOP 100 "` + col_name + `" FROM "{selected_db}"."{selected_schema}"."{selected_table}"`;
+                                    var sample_stmt = snowflake.createStatement({{sqlText: sample_sql}});
+                                    var sample_result = sample_stmt.execute();
+                                    var samples = [];
+                                    while (sample_result.next()) {{
+                                        var val = sample_result.getColumnValue(1);
+                                        if (val !== null) {{
+                                            samples.push(val.toString());
+                                        }}
+                                    }}
+                                    var sample_data = samples.join(', ');
+                                    
                                     var generate_sql = `
                                         SELECT SNOWFLAKE.CORTEX.COMPLETE(
                                             'mistral-large2',
@@ -221,10 +235,14 @@ with left_col:
                                                 'テーブル: {selected_table}\\\\n',
                                                 'テーブル説明: ` + table_comment + `\\\\n',
                                                 'カラム名: ` + col_name + `\\\\n',
-                                                'データ型: ` + data_type + `\\\\n\\\\n',
+                                                'データ型: ` + data_type + `\\\\n',
+                                                'サンプルデータ: ` + sample_data + `\\\\n\\\\n',
                                                 '【参考例】\\\\n',
-                                                'qmin: 最小流量。単位は[mm3/sec]\\\\n\\\\n',
-                                                'テーブル説明を考慮して、カラムの説明を50文字以内で生成。説明文のみ出力。'
+                                                'qmin: 最小流量。単位:[mm3/sec]\\\\n\\\\n',
+                                                'KOHIN: 子品番。\\\\n\\\\n',
+                                                '上記のテーブル名、テーブル説明、カラム名とサンプルデータを考慮して、このカラムの技術的な説明を日本語で50文字以内で簡潔に生成して。\\\\n',
+                                                '説明文のみを出力し、前置きや補足説明は不要。\\\\n',
+                                                '数値型の場合のみ単位を記載。'
                                             )
                                         ) AS comment_text
                                     `;
@@ -234,22 +252,32 @@ with left_col:
                                     result.next();
                                     var ai_comment = result.getColumnValue(1);
                                     
-                                    var escaped = ai_comment.replace(/'/g, "''");
-                                    var alter_sql = `ALTER TABLE {selected_db}.{selected_schema}.{selected_table} ALTER COLUMN ` + col_name + ` COMMENT '` + escaped + `'`;
-                                    
-                                    var alter_stmt = snowflake.createStatement({{sqlText: alter_sql}});
-                                    alter_stmt.execute();
-                                    success++;
-                                }} catch (err) {{}}
+                                    result_array.push(col_name + '|' + ai_comment);
+                                }} catch (err) {{
+                                    result_array.push(col_name + '|ERROR');
+                                }}
                             }}
                             
-                            return '生成完了: ' + success + '件';
+                            return result_array.join('^^');
                         $$
                     """).collect()
                     
                     result = session.sql(f"CALL gen_col_cmt_{selected_table}()").collect()
-                    st.success(f"✅ {result[0][0]}")
-                    st.session_state.refresh += 1
+                    result_str = result[0][0]
+                    
+                    # 結果をパース
+                    result_list = result_str.split('^^')
+                    generated_comments = {}
+                    success_count = 0
+                    for item in result_list:
+                        if '|' in item and 'ERROR' not in item:
+                            col_name, comment = item.split('|', 1)
+                            generated_comments[col_name] = comment
+                            success_count += 1
+                    
+                    # セッションステートに保存
+                    st.session_state.generated_col_comments = generated_comments
+                    st.success(f"✅ {success_count}件のコメントが生成されました")
                     st.rerun()
                 except Exception as e:
                     st.error(f"❌ エラー: {str(e)}")
@@ -262,7 +290,7 @@ with right_col:
         # 最新のテーブルコメント取得
         table_info = session.sql(f"""
             SELECT COMMENT
-            FROM {selected_db}.INFORMATION_SCHEMA.TABLES
+            FROM "{selected_db}".INFORMATION_SCHEMA.TABLES
             WHERE TABLE_SCHEMA = '{selected_schema}'
               AND TABLE_NAME = '{selected_table}'
         """).collect()
@@ -272,7 +300,7 @@ with right_col:
         # 最新のカラムコメント取得
         columns_info = session.sql(f"""
             SELECT COLUMN_NAME, DATA_TYPE, COMMENT
-            FROM {selected_db}.INFORMATION_SCHEMA.COLUMNS
+            FROM "{selected_db}".INFORMATION_SCHEMA.COLUMNS
             WHERE TABLE_SCHEMA = '{selected_schema}'
               AND TABLE_NAME = '{selected_table}'
             ORDER BY ORDINAL_POSITION
@@ -282,76 +310,163 @@ with right_col:
         #st.subheader("📖 コメントを表示・編集")
         st.markdown("---")
         st.markdown("**テーブルコメント:**")
-        # デバッグ用: コメントの有無を確認
-        if current_table_comment:
-            st.caption(f"💬 現在のコメント長: {len(current_table_comment)}文字")
+        
+        # 生成されたテーブルコメントがある場合
+        if st.session_state.generated_table_comment:
+            st.info("💡 生成されたコメントです。編集後に「保存」ボタンを押してください。")
+            
+            edited_generated_table_comment = st.text_area(
+                "生成されたテーブルコメント",
+                value=st.session_state.generated_table_comment if st.session_state.generated_table_comment else "",
+                height=80,
+                key=f"generated_table_comment_{selected_table}_{st.session_state.refresh}",
+                label_visibility="collapsed"
+            )
+            
+            col_tbl_gen1, col_tbl_gen2 = st.columns(2)
+            with col_tbl_gen1:
+                if st.button("💾 生成コメント保存", key="save_generated_table_comment", use_container_width=True, type="primary"):
+                    try:
+                        escaped = edited_generated_table_comment.replace("'", "''")
+                        session.sql(f"""
+                            ALTER TABLE "{selected_db}"."{selected_schema}"."{selected_table}"
+                            SET COMMENT = '{escaped}'
+                        """).collect()
+                        st.success("✅ 保存しました！")
+                        st.session_state.generated_table_comment = None
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ エラー: {str(e)}")
+            
+            with col_tbl_gen2:
+                if st.button("❌ キャンセル", key="cancel_generated_table_comment", use_container_width=True):
+                    st.session_state.generated_table_comment = None
+                    st.rerun()
         else:
-            st.caption("💬 コメントなし")
-        
-        edited_table_comment_quick = st.text_area(
-            "テーブルコメント",
-            value=current_table_comment if current_table_comment else "",
-            height=80,
-            key=f"quick_table_comment_{selected_table}_{st.session_state.refresh}",
-            label_visibility="collapsed"
-        )
-        
-        if st.button("💾 テーブルコメント保存", key="save_table_quick"):
-            try:
-                escaped = edited_table_comment_quick.replace("'", "''")
-                session.sql(f"""
-                    ALTER TABLE {selected_db}.{selected_schema}.{selected_table}
-                    SET COMMENT = '{escaped}'
-                """).collect()
-                st.success("✅ 保存しました！")
-                st.rerun()
-            except Exception as e:
-                st.error(f"❌ エラー: {str(e)}")
+            # 通常の編集フロー
+            # デバッグ用: コメントの有無を確認
+            if current_table_comment:
+                st.caption(f"💬 現在のコメント長: {len(current_table_comment)}文字")
+            else:
+                st.caption("💬 コメントなし")
+            
+            edited_table_comment_quick = st.text_area(
+                "テーブルコメント",
+                value=current_table_comment if current_table_comment else "",
+                height=80,
+                key=f"quick_table_comment_{selected_table}_{st.session_state.refresh}",
+                label_visibility="collapsed"
+            )
+            
+            if st.button("💾 テーブルコメント保存", key="save_table_quick"):
+                try:
+                    escaped = edited_table_comment_quick.replace("'", "''")
+                    session.sql(f"""
+                        ALTER TABLE "{selected_db}"."{selected_schema}"."{selected_table}"
+                        SET COMMENT = '{escaped}'
+                    """).collect()
+                    st.success("✅ 保存しました！")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ エラー: {str(e)}")
         
         st.markdown("---")
         st.markdown("**カラムコメント:**")
         
-        # 編集可能なデータフレーム
-        comment_df = pd.DataFrame([
-            {
-                'カラム名': row['COLUMN_NAME'],
-                'データ型': row['DATA_TYPE'],
-                'コメント': row['COMMENT'] if row['COMMENT'] else ""
-            }
-            for row in columns_info
-        ])
-        
-        edited_df = st.data_editor(
-            comment_df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "カラム名": st.column_config.TextColumn("カラム名", disabled=True, width="medium"),
-                "データ型": st.column_config.TextColumn("データ型", disabled=True, width="medium"),
-                "コメント": st.column_config.TextColumn("コメント", width="large")
-            },
-            key=f"comment_editor_{selected_table}_{st.session_state.refresh}"
-        )
-        
-        col_btn1, col_btn2 = st.columns([1, 3])
-        with col_btn1:
-            if st.button("💾 カラムコメント保存", key="save_columns_quick", use_container_width=True):
-                try:
-                    success_count = 0
-                    for idx, row in edited_df.iterrows():
-                        col_name = row['カラム名']
-                        comment = row['コメント'] if pd.notna(row['コメント']) else ""
-                        escaped = comment.replace("'", "''")
-                        session.sql(f"""
-                            ALTER TABLE {selected_db}.{selected_schema}.{selected_table}
-                            ALTER COLUMN {col_name} COMMENT '{escaped}'
-                        """).collect()
-                        success_count += 1
-                    
-                    st.success(f"✅ {success_count}件保存しました！")
+        # 生成されたコメントがある場合は、それを表示・編集
+        if st.session_state.generated_col_comments:
+            st.info("💡 生成されたコメントです。編集後に「保存」ボタンを押してください。")
+            
+            # 生成コメントをDataFrameに変換
+            generated_df = pd.DataFrame([
+                {
+                    'カラム名': col_name,
+                    'データ型': next((row['DATA_TYPE'] for row in columns_info if row['COLUMN_NAME'] == col_name), ''),
+                    'コメント': generated_comments[col_name]
+                }
+                for col_name, generated_comments in [(k, st.session_state.generated_col_comments) for k in st.session_state.generated_col_comments.keys()]
+            ])
+            
+            generated_edited_df = st.data_editor(
+                generated_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "カラム名": st.column_config.TextColumn("カラム名", disabled=True, width="medium"),
+                    "データ型": st.column_config.TextColumn("データ型", disabled=True, width="medium"),
+                    "コメント": st.column_config.TextColumn("コメント", width="large")
+                },
+                key=f"generated_comment_editor_{selected_table}_{st.session_state.refresh}"
+            )
+            
+            col_gen_btn1, col_gen_btn2 = st.columns([1, 3])
+            with col_gen_btn1:
+                if st.button("💾 生成コメント保存", key="save_generated_comments", use_container_width=True, type="primary"):
+                    try:
+                        success_count = 0
+                        for idx, row in generated_edited_df.iterrows():
+                            col_name = row['カラム名']
+                            comment = row['コメント'] if pd.notna(row['コメント']) else ""
+                            escaped = comment.replace("'", "''")
+                            session.sql(f"""
+                                ALTER TABLE "{selected_db}"."{selected_schema}"."{selected_table}"
+                                ALTER COLUMN "{col_name}" COMMENT '{escaped}'
+                            """).collect()
+                            success_count += 1
+                        
+                        st.success(f"✅ {success_count}件保存しました！")
+                        st.session_state.generated_col_comments = None
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ エラー: {str(e)}")
+            
+            with col_gen_btn2:
+                if st.button("❌ キャンセル", key="cancel_generated_comments", use_container_width=True):
+                    st.session_state.generated_col_comments = None
                     st.rerun()
-                except Exception as e:
-                    st.error(f"❌ エラー: {str(e)}")
+        else:
+            # 通常の編集フロー
+            # 編集可能なデータフレーム
+            comment_df = pd.DataFrame([
+                {
+                    'カラム名': row['COLUMN_NAME'],
+                    'データ型': row['DATA_TYPE'],
+                    'コメント': row['COMMENT'] if row['COMMENT'] else ""
+                }
+                for row in columns_info
+            ])
+            
+            edited_df = st.data_editor(
+                comment_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "カラム名": st.column_config.TextColumn("カラム名", disabled=True, width="medium"),
+                    "データ型": st.column_config.TextColumn("データ型", disabled=True, width="medium"),
+                    "コメント": st.column_config.TextColumn("コメント", width="large")
+                },
+                key=f"comment_editor_{selected_table}_{st.session_state.refresh}"
+            )
+            
+            col_btn1, col_btn2 = st.columns([1, 3])
+            with col_btn1:
+                if st.button("💾 カラムコメント保存", key="save_columns_quick", use_container_width=True):
+                    try:
+                        success_count = 0
+                        for idx, row in edited_df.iterrows():
+                            col_name = row['カラム名']
+                            comment = row['コメント'] if pd.notna(row['コメント']) else ""
+                            escaped = comment.replace("'", "''")
+                            session.sql(f"""
+                                ALTER TABLE "{selected_db}"."{selected_schema}"."{selected_table}"
+                                ALTER COLUMN "{col_name}" COMMENT '{escaped}'
+                            """).collect()
+                            success_count += 1
+                        
+                        st.success(f"✅ {success_count}件保存しました！")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ エラー: {str(e)}")
         
         # TABLE_INFO編集セクション
         st.markdown("---")

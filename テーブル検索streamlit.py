@@ -463,7 +463,7 @@ if st.session_state.selected_table_for_detail and st.session_state.selected_loca
                             COLUMN_NAME,
                             DATA_TYPE,
                             COMMENT
-                        FROM {db_name}.INFORMATION_SCHEMA.COLUMNS
+                        FROM "{db_name}".INFORMATION_SCHEMA.COLUMNS
                         WHERE TABLE_SCHEMA = '{schema_name}'
                           AND TABLE_NAME = '{table_name}'
                         ORDER BY ORDINAL_POSITION
@@ -500,7 +500,7 @@ if st.session_state.selected_table_for_detail and st.session_state.selected_loca
             try:
                 preview_query = f"""
                     SELECT *
-                    FROM {location}.{table_name}
+                    FROM "{db_name}"."{schema_name}"."{table_name}"
                     LIMIT 100
                 """
                 preview_result = session.sql(preview_query).collect()

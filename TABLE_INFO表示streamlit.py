@@ -137,7 +137,7 @@ with right_col:
                         # INFORMATION_SCHEMAからカラム情報を取得
                         columns_query = f"""
                             SELECT COLUMN_NAME, DATA_TYPE, COMMENT
-                            FROM {selected_db}.INFORMATION_SCHEMA.COLUMNS
+                            FROM "{selected_db}".INFORMATION_SCHEMA.COLUMNS
                             WHERE TABLE_SCHEMA = '{selected_schema}'
                               AND TABLE_NAME = '{selected_table}'
                             ORDER BY ORDINAL_POSITION
@@ -178,7 +178,7 @@ with right_col:
                         # テーブルデータを取得
                         data_query = f"""
                             SELECT *
-                            FROM {selected_db}.{selected_schema}.{selected_table}
+                            FROM "{selected_db}"."{selected_schema}"."{selected_table}"
                             LIMIT 100
                         """
                         
